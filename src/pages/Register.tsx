@@ -52,22 +52,34 @@ export default function Register() {
   const handleNext = async () => {
     if (currentStep === 1) {
       setLoading(true);
-      const emailExists = await checkEmailExists(formData.email);
-      setLoading(false);
+
+      let emailExists = false;
+      try {
+        emailExists = await checkEmailExists(formData.email);
+      } catch (error) {
+        // En una SPA pública, Firestore puede bloquear la consulta previa
+        // según sus reglas. No detenemos el onboarding: Firebase Auth hará
+        // una segunda validación definitiva al crear la cuenta.
+        console.warn('No fue posible hacer la validación previa del correo', error);
+      } finally {
+        setLoading(false);
+      }
       
       if (emailExists) {
-        trackEvent('Onboarding Error Encountered', {
+        await trackEvent('Onboarding Error Encountered', {
           step_name: "Datos Personales",
           error_type: "existing_account",
           error_code: "ERR_EMAIL_ALREADY_REGISTERED",
           is_recoverable: true
         });
         alert('Ya tienes una cuenta con este correo. Ingresa para continuar.');
-        navigate(`/login${location.search}`, { state: { email: formData.email } });
+        navigate(`/login${location.search}`, {
+          state: { email: formData.email.trim().toLowerCase() }
+        });
         return;
       }
 
-      trackEvent('Personal Information Submitted', {
+      await trackEvent('Personal Information Submitted', {
         step_number: 1,
         completion_time_seconds: Math.floor((Date.now() - startTime) / 1000),
         validation_status: 'success'
@@ -100,49 +112,98 @@ export default function Register() {
       }
 
       try {
+        let assignedUserId: string;
+
         if (auth) {
-          const userCredential = await createUserWithEmailAndPassword(auth, formData.email, formData.password);
-          await createIdentity(formData.email, userCredential.user.uid);
+          const userCredential = await createUserWithEmailAndPassword(
+            auth,
+            formData.email.trim().toLowerCase(),
+            formData.password
+          );
+          assignedUserId = await createIdentity(
+            formData.email,
+            userCredential.user.uid
+          );
         } else {
-          // Local fallback identity
-          await createIdentity(formData.email, 'local_uid_' + Date.now());
+          // Fallback local únicamente para demo sin Firebase.
+          assignedUserId = await createIdentity(
+            formData.email,
+            `local_uid_${Date.now()}`
+          );
         }
-        
-        trackEvent('Bank Account Connected', {
+
+        await trackEvent('Bank Account Connected', {
           connection_method: 'manual',
           connection_status: 'success'
         });
-        
-        saveUser({
+
+        // Guardar + identificar ANTES de Account Registration Completed.
+        // Así ese evento ya viaja con el FID estable y con las user properties
+        // de registro completado.
+        await saveUser({
+          userId: assignedUserId,
           firstName: formData.firstName,
           lastName: formData.lastName,
-          status: 'registered_no_investment'
+          status: 'registered_no_investment',
+          accountCreatedAt: new Date().toISOString(),
+          investorProfile: 'unknown',
+          totalInvested: 0,
+          activeFunds: [],
+          recurringContributionEnabled: false,
+          recurringAmount: null,
+          lastInvestmentDate: null,
+          customerTenureDays: 0,
+          hasEverInvested: false,
+          daysSinceLastInvestment: null
         });
-        
+
         const params = new URLSearchParams(location.search);
         const redirect = params.get('redirect');
-        
+
         let targetUrl = '/dashboard';
-        let entryPoint = 'organic';
+        let entryPoint = 'direct';
 
         if (redirect) {
           targetUrl = `/${redirect}`;
-          
+
           if (redirect.includes('fund=')) entryPoint = 'fund_detail';
           if (redirect.includes('simulated=true')) entryPoint = 'simulator';
         }
-        
-        trackEvent('Account Registration Completed', {
+
+        await trackEvent('Account Registration Completed', {
           onboarding_duration_seconds: Math.floor((Date.now() - startTime) / 1000),
           entry_point: entryPoint,
           acquisition_source: localStorage.getItem('fiducia_utm_source') || 'direct'
         });
-        
+
         setLoading(false);
         navigate(targetUrl);
       } catch (error: any) {
         setLoading(false);
         console.error(error);
+
+        if (error?.code === 'auth/email-already-in-use') {
+          await trackEvent('Onboarding Error Encountered', {
+            step_name: 'Datos Personales',
+            error_type: 'existing_account',
+            error_code: 'ERR_EMAIL_ALREADY_REGISTERED',
+            is_recoverable: true
+          });
+
+          alert('Ya tienes una cuenta con este correo. Ingresa para continuar.');
+          navigate(`/login${location.search}`, {
+            state: { email: formData.email.trim().toLowerCase() }
+          });
+          return;
+        }
+
+        await trackEvent('Onboarding Error Encountered', {
+          step_name: 'Cuenta Bancaria',
+          error_type: 'account_creation_error',
+          error_code: error?.code || 'ERR_ACCOUNT_CREATION',
+          is_recoverable: true
+        });
+
         alert('Error al crear cuenta: ' + error.message);
       }
     }
