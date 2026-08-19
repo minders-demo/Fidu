@@ -7,22 +7,52 @@ const SERVER_ZONE = import.meta.env.VITE_AMPLITUDE_SERVER_ZONE || 'US';
 const EXPERIMENT_DEPLOYMENT_KEY = import.meta.env.VITE_AMPLITUDE_EXPERIMENT_DEPLOYMENT_KEY;
 
 let experimentClient: ReturnType<typeof Experiment.initializeWithAmplitudeAnalytics> | null = null;
-let experimentReady = false;
+
+const getUrlParam = (param: string): string | null => {
+  if (typeof window === 'undefined') return null;
+
+  const searchParams = new URLSearchParams(window.location.search);
+  const searchValue = searchParams.get(param);
+  if (searchValue) return searchValue;
+
+  const hash = window.location.hash;
+  const hashQueryIndex = hash.indexOf('?');
+  if (hashQueryIndex >= 0) {
+    const hashParams = new URLSearchParams(hash.substring(hashQueryIndex + 1));
+    const hashValue = hashParams.get(param);
+    if (hashValue) return hashValue;
+  }
+
+  return null;
+};
 
 export const initAmplitude = async () => {
   if (typeof window === 'undefined') return;
 
-  // Session Replay Setup
   const sessionReplay = sessionReplayPlugin({
     sampleRate: 1.0,
     privacyConfig: {
-      blockSelector: ['.sensitive-data', 'input[type="password"]', 'input[name="idDocument"]', 'input[name="accountNumber"]', 'input[name="email"]', 'input[type="email"]'],
-      maskSelector: ['.sensitive-data', 'input[type="password"]', 'input[name="idDocument"]', 'input[name="accountNumber"]', 'input[name="email"]', 'input[type="email"]'],
+      blockSelector: [
+        '.sensitive-data',
+        'input[type="password"]',
+        'input[name="idDocument"]',
+        'input[name="accountNumber"]',
+        'input[name="email"]',
+        'input[type="email"]'
+      ],
+      maskSelector: [
+        '.sensitive-data',
+        'input[type="password"]',
+        'input[name="idDocument"]',
+        'input[name="accountNumber"]',
+        'input[name="email"]',
+        'input[type="email"]'
+      ],
     }
   });
+
   amplitude.add(sessionReplay);
 
-  // Initialize Analytics with Autocapture
   amplitude.init(API_KEY, undefined, {
     serverZone: SERVER_ZONE as any,
     autocapture: {
@@ -37,89 +67,135 @@ export const initAmplitude = async () => {
     },
   });
 
-  // Initialize Experiment if key exists using the official integration
   if (EXPERIMENT_DEPLOYMENT_KEY) {
     experimentClient = Experiment.initializeWithAmplitudeAnalytics(EXPERIMENT_DEPLOYMENT_KEY, {
       debug: true,
     });
-    // Attempt to fetch variations for the current user
+
     try {
       await experimentClient.fetch();
-      experimentReady = true;
-    } catch (e) {
-      console.error('Amplitude Experiment fetch failed', e);
+    } catch (error) {
+      console.error('Amplitude Experiment fetch failed', error);
     }
   }
 };
 
-export const trackEvent = (eventName: string, eventProperties?: Record<string, any>) => {
+export const trackEvent = async (
+  eventName: string,
+  eventProperties?: Record<string, any>
+) => {
   if (typeof window === 'undefined') return;
+
   console.log(`[Amplitude Track] ${eventName}`, eventProperties);
-  amplitude.track(eventName, eventProperties);
+
+  try {
+    return await amplitude.track(eventName, eventProperties).promise;
+  } catch (error) {
+    console.error(`Amplitude track failed: ${eventName}`, error);
+  }
 };
 
-export const identifyUser = async (userId: string | null, userProperties?: Record<string, any>) => {
+export const identifyUser = async (
+  userId: string | null,
+  userProperties?: Record<string, any>
+) => {
   if (typeof window === 'undefined') return;
+
   if (userId) {
     amplitude.setUserId(userId);
   }
-  
+
   if (userProperties) {
     const identify = new amplitude.Identify();
+    let hasOperations = false;
+
     Object.entries(userProperties).forEach(([key, value]) => {
-      identify.set(key, value as any);
+      if (value === undefined) return;
+
+      if (value === null) {
+        identify.unset(key);
+      } else {
+        identify.set(key, value as any);
+      }
+
+      hasOperations = true;
     });
-    amplitude.identify(identify);
+
+    if (hasOperations) {
+      try {
+        await amplitude.identify(identify).promise;
+      } catch (error) {
+        console.error('Amplitude identify failed', error);
+      }
+    }
   }
 
   if (experimentClient) {
     try {
       await experimentClient.fetch();
-    } catch (e) {
-      console.error('Amplitude Experiment fetch failed after identify', e);
+    } catch (error) {
+      console.error('Amplitude Experiment fetch failed after identify', error);
     }
   }
 };
 
 export const resetAmplitude = () => {
   if (typeof window === 'undefined') return;
-  
+
   if (experimentClient) {
-    // 1. Limpiar variantes cacheadas de Experiment
     experimentClient.clear();
   }
-  
-  // 2. Limpiar identidad de Analytics (Genera nuevo device_id/estado anónimo)
+
   amplitude.reset();
-  
-  // 3. (Opcional) Reevaluar variantes anónimas para el nuevo usuario anónimo
+
   if (experimentClient) {
     experimentClient.fetch().catch(console.error);
   }
 };
 
-export const getExperimentVariant = (flagKey: string, fallback: string = 'control'): string => {
+export const getExperimentVariant = (
+  flagKey: string,
+  fallback: string = 'control'
+): string => {
   if (!experimentClient) return fallback;
   const variant = experimentClient.variant(flagKey);
   return variant.value || fallback;
 };
 
-// URL UTM tracking helper
+/**
+ * Captura únicamente las UTMs definidas en el tracking plan de Fiducia.
+ * Persiste los últimos valores conocidos para conservar la atribución durante
+ * el journey interno de la SPA.
+ */
 export const captureUTMs = () => {
-  if (typeof window === 'undefined') return;
-  const urlParams = new URLSearchParams(window.location.search);
+  if (typeof window === 'undefined') {
+    return {
+      utm_source: 'direct',
+      utm_medium: 'none',
+      utm_campaign: 'none',
+    };
+  }
+
+  const defaults: Record<string, string> = {
+    utm_source: 'direct',
+    utm_medium: 'none',
+    utm_campaign: 'none',
+  };
+
   const utms: Record<string, string> = {};
-  
-  ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'].forEach((param) => {
-    const value = urlParams.get(param);
+
+  ['utm_source', 'utm_medium', 'utm_campaign'].forEach((param) => {
+    const value = getUrlParam(param);
+
     if (value) {
       utms[param] = value;
       localStorage.setItem(`fiducia_${param}`, value);
-    } else {
-      const stored = localStorage.getItem(`fiducia_${param}`);
-      if (stored) utms[param] = stored;
+      return;
     }
+
+    const stored = localStorage.getItem(`fiducia_${param}`);
+    utms[param] = stored || defaults[param];
   });
-  
+
   return utms;
 };
