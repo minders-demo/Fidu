@@ -1,27 +1,84 @@
-import { useState, useEffect } from 'react';
-import { UserData, UserStatus } from '../types';
+import { useEffect, useState } from 'react';
+import { UserData } from '../types';
 import { identifyUser, resetAmplitude } from './amplitude';
 import { auth, db } from './firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
-import { getIdentityByEmail } from './identity';
+import { createIdentity, getIdentityByEmail, isValidFid } from './identity';
 
 const STORAGE_KEY = 'fiducia_demo_user';
 
-const computeUserProperties = (user: UserData) => {
-  const hasEverInvested = user.totalInvested > 0;
-  let daysSinceLastInvestment = null;
-  
+const createEmptyUser = (userId: string): UserData => ({
+  userId,
+  firstName: '',
+  lastName: '',
+  status: 'prospect',
+  totalInvested: 0,
+  activeFunds: [],
+  recurringContributionEnabled: false,
+  recurringAmount: null,
+  lastInvestmentDate: null,
+  investorProfile: 'unknown',
+  financialGoal: '',
+  customerTenureDays: 0,
+  hasEverInvested: false,
+  daysSinceLastInvestment: null,
+  accountCreatedAt: null,
+});
+
+const computeUserProperties = (user: UserData): UserData => {
+  const now = Date.now();
+  const hasEverInvested = user.totalInvested > 0 || user.hasEverInvested;
+
+  let daysSinceLastInvestment: number | null = null;
   if (user.lastInvestmentDate) {
-    const diffTime = Math.abs(new Date().getTime() - new Date(user.lastInvestmentDate).getTime());
-    daysSinceLastInvestment = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+    const investmentTime = new Date(user.lastInvestmentDate).getTime();
+    if (!Number.isNaN(investmentTime)) {
+      daysSinceLastInvestment = Math.max(
+        0,
+        Math.floor((now - investmentTime) / (1000 * 60 * 60 * 24))
+      );
+    }
+  }
+
+  let customerTenureDays = user.customerTenureDays || 0;
+  if (user.accountCreatedAt) {
+    const createdTime = new Date(user.accountCreatedAt).getTime();
+    if (!Number.isNaN(createdTime)) {
+      customerTenureDays = Math.max(
+        0,
+        Math.floor((now - createdTime) / (1000 * 60 * 60 * 24))
+      );
+    }
   }
 
   return {
     ...user,
     hasEverInvested,
-    daysSinceLastInvestment
+    daysSinceLastInvestment,
+    customerTenureDays,
   };
+};
+
+const buildAmplitudeUserProperties = (user: UserData) => {
+  const properties: Record<string, any> = {
+    registration_status: user.status === 'prospect' ? 'not_completed' : 'completed',
+    investor_status: user.status,
+    investor_profile: user.investorProfile,
+    customer_tenure_days: user.customerTenureDays,
+    has_ever_invested: user.hasEverInvested,
+    active_fund_count: user.activeFunds.length,
+    total_invested_amount: user.totalInvested,
+    last_investment_date: user.lastInvestmentDate,
+    days_since_last_investment: user.daysSinceLastInvestment,
+    recurring_contribution_enabled: user.recurringContributionEnabled,
+  };
+
+  if (user.financialGoal) {
+    properties.financial_goal = user.financialGoal;
+  }
+
+  return properties;
 };
 
 export const useUser = () => {
@@ -30,170 +87,186 @@ export const useUser = () => {
 
   useEffect(() => {
     if (!auth) {
-      // Fallback local storage for demo if Firebase not configured
       const stored = localStorage.getItem(STORAGE_KEY);
+
       if (stored) {
-        const parsedUser = computeUserProperties(JSON.parse(stored));
-        setUser(parsedUser);
-        identifyUser(parsedUser.status !== 'prospect' ? parsedUser.userId : null, {
-          registration_status: parsedUser.status !== 'prospect' ? 'registered' : 'unregistered',
-          investor_status: parsedUser.status,
-          total_invested_amount: parsedUser.totalInvested,
-          active_fund_count: parsedUser.activeFunds.length,
-          recurring_contribution_enabled: parsedUser.recurringContributionEnabled,
-          investor_profile: parsedUser.investorProfile,
-          financial_goal: parsedUser.financialGoal,
-          customer_tenure_days: parsedUser.customerTenureDays,
-          has_ever_invested: parsedUser.hasEverInvested,
-          days_since_last_investment: parsedUser.daysSinceLastInvestment,
-        });
+        try {
+          const parsedUser = computeUserProperties(JSON.parse(stored) as UserData);
+          setUser(parsedUser);
+
+          if (parsedUser.status !== 'prospect' && isValidFid(parsedUser.userId)) {
+            identifyUser(parsedUser.userId, buildAmplitudeUserProperties(parsedUser));
+          }
+        } catch (error) {
+          console.error('Error reading local user profile', error);
+          localStorage.removeItem(STORAGE_KEY);
+        }
       }
+
       setLoading(false);
       return;
     }
 
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser) {
-        if (db) {
-          try {
-            const userRef = doc(db, 'users', firebaseUser.uid);
-            const userSnap = await getDoc(userRef);
-            
-            let profile: UserData;
-            if (userSnap.exists()) {
-              profile = userSnap.data() as UserData;
-            } else {
-              // Retrieve FID
-              let fid = firebaseUser.uid;
-              if (firebaseUser.email) {
-                const fetchedFid = await getIdentityByEmail(firebaseUser.email);
-                if (fetchedFid) fid = fetchedFid;
-              }
+    const unsubscribe = onAuthStateChanged(auth, async firebaseUser => {
+      if (!firebaseUser) {
+        setUser(null);
+        setLoading(false);
+        return;
+      }
 
-              profile = {
-                userId: fid,
-                firstName: '',
-                lastName: '',
-                status: 'prospect',
-                totalInvested: 0,
-                activeFunds: [],
-                recurringContributionEnabled: false,
-                recurringAmount: null,
-                lastInvestmentDate: null,
-                investorProfile: 'unknown' as any,
-                financialGoal: '',
-                customerTenureDays: 0,
-                hasEverInvested: false,
-                daysSinceLastInvestment: null
-              };
-            }
-            
-            const computed = computeUserProperties(profile);
-            setUser(computed);
-            
-            identifyUser(computed.status !== 'prospect' ? computed.userId : null, {
-              registration_status: computed.status !== 'prospect' ? 'registered' : 'unregistered',
-              investor_status: computed.status,
-              total_invested_amount: computed.totalInvested,
-              active_fund_count: computed.activeFunds.length,
-              recurring_contribution_enabled: computed.recurringContributionEnabled,
-              investor_profile: computed.investorProfile,
-              financial_goal: computed.financialGoal,
-              customer_tenure_days: computed.customerTenureDays,
-              has_ever_invested: computed.hasEverInvested,
-              days_since_last_investment: computed.daysSinceLastInvestment,
-            });
-          } catch (error) {
-            console.error("Error fetching user profile", error);
+      if (!db) {
+        setLoading(false);
+        return;
+      }
+
+      try {
+        const userRef = doc(db, 'users', firebaseUser.uid);
+        const userSnap = await getDoc(userRef);
+        const storedProfile = userSnap.exists()
+          ? (userSnap.data() as UserData)
+          : null;
+
+        let fid: string | null = null;
+
+        if (firebaseUser.email) {
+          fid = await getIdentityByEmail(firebaseUser.email);
+
+          // Recuperación segura: si Authentication ya existe pero la identidad
+          // todavía no fue creada, se genera una sola vez mediante transacción.
+          if (!fid) {
+            fid = await createIdentity(firebaseUser.email, firebaseUser.uid);
           }
         }
-      } else {
+
+        // Nunca usar firebaseUser.uid como user_id de Amplitude.
+        if (!fid && storedProfile && isValidFid(storedProfile.userId)) {
+          fid = storedProfile.userId;
+        }
+
+        if (!fid) {
+          throw new Error('No fue posible resolver un FID válido para el usuario autenticado.');
+        }
+
+        const profile = computeUserProperties({
+          ...(storedProfile || createEmptyUser(fid)),
+          userId: fid,
+          accountCreatedAt:
+            storedProfile?.accountCreatedAt ||
+            firebaseUser.metadata.creationTime ||
+            null,
+        });
+
+        setUser(profile);
+
+        // Repara perfiles creados por versiones anteriores que hayan guardado
+        // accidentalmente el Firebase UID en lugar del FID.
+        if (!storedProfile || storedProfile.userId !== fid) {
+          await setDoc(
+            userRef,
+            {
+              ...profile,
+              userId: fid,
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true }
+          );
+        }
+
+        if (profile.status !== 'prospect') {
+          await identifyUser(fid, buildAmplitudeUserProperties(profile));
+        }
+      } catch (error) {
+        console.error('Error fetching/resolving user profile', error);
         setUser(null);
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     });
 
     return () => unsubscribe();
   }, []);
 
-  const saveUser = async (newData: Partial<UserData>) => {
-    let currentUserFid = user ? user.userId : null;
+  const saveUser = async (newData: Partial<UserData>): Promise<UserData> => {
+    let resolvedUserId = isValidFid(newData.userId)
+      ? newData.userId
+      : user && isValidFid(user.userId)
+        ? user.userId
+        : null;
 
-    if (!currentUserFid && auth?.currentUser?.email) {
-      currentUserFid = await getIdentityByEmail(auth.currentUser.email);
+    if (!resolvedUserId && auth?.currentUser?.email) {
+      resolvedUserId = await getIdentityByEmail(auth.currentUser.email);
+
+      if (!resolvedUserId) {
+        resolvedUserId = await createIdentity(
+          auth.currentUser.email,
+          auth.currentUser.uid
+        );
+      }
     }
-    if (!currentUserFid) {
-      // For anonymous/demo if Firebase offline
+
+    if (!resolvedUserId) {
       const stored = localStorage.getItem(STORAGE_KEY);
       if (stored) {
-         currentUserFid = JSON.parse(stored).userId;
-      }
-      if (!currentUserFid) {
-        currentUserFid = `FID_${Math.floor(Math.random() * 1000000).toString().padStart(6, '0')}`;
+        try {
+          const storedUser = JSON.parse(stored) as UserData;
+          if (isValidFid(storedUser.userId)) {
+            resolvedUserId = storedUser.userId;
+          }
+        } catch {
+          // Continúa hacia el error explícito de identidad.
+        }
       }
     }
 
-    setUser(prev => {
-      let baseUser: UserData = prev || {
-        userId: currentUserFid!,
-        firstName: '',
-        lastName: '',
-        status: 'prospect',
-        totalInvested: 0,
-        activeFunds: [],
-        recurringContributionEnabled: false,
-        recurringAmount: null,
-        lastInvestmentDate: null,
-        investorProfile: 'unknown',
-        financialGoal: '',
-        customerTenureDays: 0,
-        hasEverInvested: false,
-        daysSinceLastInvestment: null
-      };
-      
-      const updatedUser = computeUserProperties({ ...baseUser, ...newData });
-      
-      if (auth?.currentUser && db) {
-        setDoc(doc(db, 'users', auth.currentUser.uid), {
-          ...updatedUser,
-          updatedAt: serverTimestamp()
-        }, { merge: true }).catch(console.error);
-      } else {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedUser));
-      }
-      
-      identifyUser(updatedUser.status !== 'prospect' ? updatedUser.userId : null, {
-        registration_status: updatedUser.status !== 'prospect' ? 'registered' : 'unregistered',
-        investor_status: updatedUser.status,
-        total_invested_amount: updatedUser.totalInvested,
-        active_fund_count: updatedUser.activeFunds.length,
-        recurring_contribution_enabled: updatedUser.recurringContributionEnabled,
-        investor_profile: updatedUser.investorProfile,
-        financial_goal: updatedUser.financialGoal,
-        customer_tenure_days: updatedUser.customerTenureDays,
-        has_ever_invested: updatedUser.hasEverInvested,
-        days_since_last_investment: updatedUser.daysSinceLastInvestment,
-      });
-      
-      return updatedUser;
+    if (!resolvedUserId) {
+      throw new Error(
+        'No existe un FID válido. La identidad debe crearse antes de guardar el perfil.'
+      );
+    }
+
+    const baseUser = user
+      ? { ...user, userId: resolvedUserId }
+      : createEmptyUser(resolvedUserId);
+
+    const updatedUser = computeUserProperties({
+      ...baseUser,
+      ...newData,
+      userId: resolvedUserId,
     });
+
+    if (auth?.currentUser && db) {
+      await setDoc(
+        doc(db, 'users', auth.currentUser.uid),
+        {
+          ...updatedUser,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+    } else {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedUser));
+    }
+
+    setUser(updatedUser);
+
+    if (updatedUser.status !== 'prospect') {
+      await identifyUser(
+        updatedUser.userId,
+        buildAmplitudeUserProperties(updatedUser)
+      );
+    }
+
+    return updatedUser;
   };
 
   const clearUser = async () => {
-    // 1. Firebase Authentication signOut()
     if (auth) {
       await auth.signOut();
     }
-    
-    // 2 & 3. Limpiar identidades de Amplitude Experiment y Analytics
-    resetAmplitude();
 
-    // 4. Limpiar únicamente caches de sesión (Firestore mantiene los datos intactos)
+    resetAmplitude();
     localStorage.removeItem(STORAGE_KEY);
     setUser(null);
-    
-    // 6. Redirigir al Home
-    window.location.href = '/';
   };
 
   return { user, saveUser, clearUser, loading };
