@@ -54,28 +54,22 @@ export default function InvestApply() {
       totalInvested: (user?.totalInvested || 0) + initialAmount,
       activeFunds: newActiveFunds,
       lastInvestmentDate: new Date().toISOString(),
-      ...(goal && { financialGoal: goal }),
-      ...(monthlyAmount > 0 && {
-        recurringContributionEnabled: true,
-        recurringAmount: monthlyAmount
-      })
+      ...(goal && { financialGoal: goal })
     });
 
-    trackEvent('Investment Completed', {
+    // Las user properties ya quedaron actualizadas por saveUser().
+    // Investment Completed se registra después para que el evento capture
+    // el estado actualizado del usuario en Amplitude.
+    await trackEvent('Investment Completed', {
       fund_id: fundId,
       investment_amount: initialAmount,
       contribution_frequency: monthlyAmount > 0 ? 'monthly' : 'none',
       is_first_investment: isFirstInvestment
     });
 
-    if (monthlyAmount > 0) {
-      trackEvent('Recurring Contribution Created', {
-        fund_id: fundId,
-        recurring_amount: monthlyAmount,
-        frequency: 'monthly',
-        debit_day: 5
-      });
-    }
+    // IMPORTANTE: monthlyAmount viene del simulador y representa intención.
+    // No crea por sí solo un aporte recurrente. Ese evento se dispara
+    // exclusivamente desde /recurring cuando el usuario lo confirma.
 
     setLoading(false);
     navigate('/success');
