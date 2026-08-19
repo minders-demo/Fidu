@@ -1,0 +1,6 @@
+{
+  "name": "Fiducia Demo App",
+  "description": "A demo application inspired by Fiducia, showcasing Amplitude integration for onboarding and investment journeys.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

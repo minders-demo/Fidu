@@ -1,0 +1,22 @@
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap');
+@import "tailwindcss";
+
+:root {
+  --mf-yellow: #FCC710;
+  --mf-yellow-hover: #EAB900;
+  --mf-charcoal: #201D1A;
+  --mf-background: #F9F9F8;
+  --mf-surface: #FFFFFF;
+  --mf-gray-100: #F1F1EF;
+  --mf-gray-200: #E3E3E0;
+  --mf-gray-400: #999999;
+  --mf-gray-600: #626362;
+  --mf-cash: #EF942F;
+  --mf-acumulacion: #1D9E84;
+}
+
+body {
+  font-family: 'Montserrat', sans-serif;
+  background-color: var(--mf-background);
+  color: var(--mf-charcoal);
+}
