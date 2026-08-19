@@ -24,13 +24,14 @@ export default function Recurring() {
       recurringAmount: amount
     });
 
-    trackEvent('Recurring Contribution Created', {
+    await trackEvent('Recurring Contribution Created', {
       fund_id: fundId,
       recurring_amount: amount,
       frequency: 'monthly',
       debit_day: day
     });
     
+    setLoading(false);
     navigate('/dashboard');
   };
 
