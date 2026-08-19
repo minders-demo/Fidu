@@ -16,6 +16,7 @@ export interface UserData {
   customerTenureDays: number;
   hasEverInvested: boolean;
   daysSinceLastInvestment: number | null;
+  accountCreatedAt: string | null;
 }
 
 export interface Fund {
