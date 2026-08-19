@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { trackEvent } from '../lib/amplitude';
@@ -7,6 +7,10 @@ import { Check, ArrowRight, RefreshCw } from 'lucide-react';
 
 export default function Success() {
   const { user } = useUser();
+  const receiptId = useMemo(
+    () => `INV-${Math.floor(Math.random() * 1000000).toString().padStart(6, '0')}`,
+    []
+  );
 
   useEffect(() => {
   }, []);
@@ -51,7 +55,7 @@ export default function Success() {
               </div>
               <div className="flex justify-between items-center">
                 <span className="text-sm text-gray-500">Comprobante</span>
-                <span className="font-mono text-xs text-gray-400">#FID-{Math.floor(Math.random() * 1000000)}</span>
+                <span className="font-mono text-xs text-gray-400">#{receiptId}</span>
               </div>
             </div>
             
